@@ -1,2 +1,5 @@
-github.com/caddy-dns/cloudflare
-github.com/hslatman/caddy-crowdsec-bouncer/http
+github.com/hslatman/caddy-crowdsec-bouncer
+github.com/caddy-dns/porkbun
+github.com/lucaslorentz/caddy-docker-proxy/v2
+github.com/greenpau/caddy-security
+github.com/mholt/caddy-l4
