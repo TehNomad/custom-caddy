@@ -3,3 +3,4 @@ github.com/caddy-dns/porkbun
 github.com/lucaslorentz/caddy-docker-proxy/v2
 github.com/greenpau/caddy-security
 github.com/mholt/caddy-l4
+github.com/mholt/caddy-webdav
