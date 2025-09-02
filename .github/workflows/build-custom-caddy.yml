@@ -1,101 +1,96 @@
 name: Build Custom Caddy if New Version Available
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Allows manual triggering
   schedule:
-    - cron: '0 0 * * *'  # Every day
+    - cron: '0 0 * * *' # Every day at midnight UTC
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
-    outputs:
-      latest_tag: ${{ steps.caddy.outputs.latest_tag }}
-      should_build: ${{ steps.should_build.outputs.should_build }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Fetch latest Caddy release (authenticated)
-        id: caddy
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          latest=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            https://api.github.com/repos/caddyserver/caddy/releases/latest | jq -r .tag_name)
-          echo "Latest Caddy version: $latest"
-          echo "latest_tag=$latest" >> $GITHUB_OUTPUT
-
-      - name: Read last built version (if exists)
-        id: last_built
-        run: |
-          if [ -f LAST_CADDY_RELEASE.txt ]; then
-            last=$(cat LAST_CADDY_RELEASE.txt)
-            echo "Last built version: $last"
-            echo "last_built=$last" >> $GITHUB_OUTPUT
-          else
-            echo "No previous version found"
-            echo "last_built=none" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Compare versions
-        id: should_build
-        run: |
-          if [ "${{ steps.caddy.outputs.latest_tag }}" != "${{ steps.last_built.outputs.last_built }}" ]; then
-            echo "New version detected!"
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          else
-            echo "No new version."
-            echo "should_build=false" >> $GITHUB_OUTPUT
-          fi
-
-  build:
-    needs: check
+  build_if_new:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Needed to push version file and create release
-    if: needs.check.outputs.should_build == 'true'
+      contents: write # Needed to create the GitHub Release
+
     steps:
-      - name: Set up Go
+      - name: 🔎 Get latest Caddy version
+        id: caddy_version
+        uses: pozetroninc/github-action-get-latest-release@v0.8.0
+        with:
+          repository: caddyserver/caddy
+
+      - name: 📝 Check if release for this version already exists
+        id: check_release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              const release = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: 'custom-${{ steps.caddy_version.outputs.release }}',
+              });
+              console.log('Release custom-${{ steps.caddy_version.outputs.release }} already exists.');
+              return false; // Release exists, do not proceed
+            } catch (error) {
+              if (error.status === 404) {
+                console.log('No release found for custom-${{ steps.caddy_version.outputs.release }}. Proceeding to build.');
+                return true; // Release does not exist, proceed
+              } else {
+                throw error; // Rethrow other errors
+              }
+            }
+        # This output will be 'true' if we need to build, and 'false' otherwise.
+        # We use it in the 'if' condition of subsequent steps.
+
+      - name: ⬇️ Checkout code
+        if: steps.check_release.outputs.result == 'true'
+        uses: actions/checkout@v4
+
+      - name: 🟢 Set up Go
+        if: steps.check_release.outputs.result == 'true'
         uses: actions/setup-go@v5
         with:
           go-version: 'stable'
+          cache: true # Enable caching for Go modules
 
-      - name: Install xcaddy
+      - name: 📦 Cache xcaddy binary
+        if: steps.check_release.outputs.result == 'true'
+        id: cache-xcaddy
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin/xcaddy
+          key: ${{ runner.os }}-xcaddy
+
+      - name: 🛠️ Install xcaddy
+        if: steps.check_release.outputs.result == 'true' && steps.cache-xcaddy.outputs.cache-hit != 'true'
         run: go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
 
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Read plugin list from file
+      - name: 📚 Read plugin list from file
+        if: steps.check_release.outputs.result == 'true'
         id: plugins
         run: |
+          # This command reads each line in CADDY_PLUGINS.txt,
+          # prepends '--with ' to it, and joins them all into a single line.
           echo "plugin_args=$(sed 's/^/--with /' CADDY_PLUGINS.txt | xargs)" >> $GITHUB_OUTPUT
 
-      - name: Build custom Caddy
+      - name: 🏗️ Build custom Caddy binary
+        if: steps.check_release.outputs.result == 'true'
         run: |
-          xcaddy build ${{ needs.check.outputs.latest_tag }} ${{ steps.plugins.outputs.plugin_args }}
-          mv caddy caddy-custom
+          # Use the xcaddy binary from the Go bin path
+          ~/go/bin/xcaddy build ${{ steps.caddy_version.outputs.release }} ${{ steps.plugins.outputs.plugin_args }}
+          # Rename the output for clarity in the release
+          mv caddy caddy-custom-${{ steps.caddy_version.outputs.release }}
 
-      - name: Create GitHub release
+      - name: 🎉 Create GitHub Release
+        if: steps.check_release.outputs.result == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: custom-${{ needs.check.outputs.latest_tag }}
-          name: Custom Caddy - ${{ needs.check.outputs.latest_tag }}
+          tag_name: custom-${{ steps.caddy_version.outputs.release }}
+          name: Custom Caddy - ${{ steps.caddy_version.outputs.release }}
           body: |
-            xcaddy build ${{ steps.plugins.outputs.plugin_args }}
-          files: caddy-custom
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            This is an automated build of Caddy version **${{ steps.caddy_version.outputs.release }}** with the following custom plugins:
 
-      - name: Save latest version to file
-        run: echo "${{ needs.check.outputs.latest_tag }}" > LAST_CADDY_RELEASE.txt
-
-      - name: Commit updated LAST_CADDY_RELEASE.txt
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add LAST_CADDY_RELEASE.txt
-          git commit -m "Update last built Caddy version to ${{ needs.check.outputs.latest_tag }}"
-          git push
-
+            ```
+            ${{ steps.plugins.outputs.plugin_args }}
+            ```
+          files: caddy-custom-${{ steps.caddy_version.outputs.release }}
