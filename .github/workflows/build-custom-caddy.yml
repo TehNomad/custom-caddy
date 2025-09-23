@@ -17,6 +17,7 @@ jobs:
         uses: pozetroninc/github-action-get-latest-release@v0.8.0
         with:
           repository: caddyserver/caddy
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 📝 Check if release for this version already exists
         id: check_release
