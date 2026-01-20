@@ -1,5 +1,4 @@
-github.com/hslatman/caddy-crowdsec-bouncer
 github.com/caddy-dns/porkbun
 github.com/lucaslorentz/caddy-docker-proxy/v2
 github.com/mholt/caddy-webdav
-github.com/sjtug/caddy2-filter
+github.com/mholt/caddy-dynamicdns
