@@ -13,5 +13,5 @@ github.com/hslatman/caddy-crowdsec-bouncer/http
 
 `caddy upgrade` is unreliable and might be removed in the future. This offers a replacement without having to build locally
 ```
-$ wget -q https://github.com/HamletDuFromage/custom-caddy/releases/latest/download/caddy-custom
+$ wget -q https://github.com/TehNomad/custom-caddy/releases/latest/download/caddy-custom
 ```
