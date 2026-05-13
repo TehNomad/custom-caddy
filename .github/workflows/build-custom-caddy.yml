@@ -80,7 +80,7 @@ jobs:
           # Use the xcaddy binary from the Go bin path
           ~/go/bin/xcaddy build ${{ steps.caddy_version.outputs.release }} ${{ steps.plugins.outputs.plugin_args }}
           # Rename the output for clarity in the release
-          mv caddy caddy-custom-${{ steps.caddy_version.outputs.release }}
+          mv caddy caddy-custom
 
       - name: 🎉 Create GitHub Release
         if: steps.check_release.outputs.result == 'true'
