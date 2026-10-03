@@ -13,7 +13,6 @@ jobs:
 
     steps:
       - name: 🔎 Get latest Caddy version            ```
-          files: caddy-custom
         id: caddy_version
         uses: pozetroninc/github-action-get-latest-release@v0.8.0
         with:
