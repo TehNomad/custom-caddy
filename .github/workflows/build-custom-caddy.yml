@@ -3,16 +3,16 @@ name: Build Custom Caddy if New Version Available
 on:
   workflow_dispatch: # Allows manual triggering
   schedule:
-    - cron: '0 */6 * * *' # Every day at midnight UTC
+    - cron: '0 */6 * * *' # Increased frequency: runs every 6 hours
 
 jobs:
-  build_if_new:
+  check_version:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # Needed to create the GitHub Release
-
+    outputs:
+      should_build: ${{ steps.check_release.outputs.result }}
+      caddy_version: ${{ steps.caddy_version.outputs.release }}
     steps:
-      - name: 🔎 Get latest Caddy version            ```
+      - name: 🔎 Get latest Caddy version
         id: caddy_version
         uses: pozetroninc/github-action-get-latest-release@v0.8.0
         with:
@@ -40,58 +40,65 @@ jobs:
                 throw error; // Rethrow other errors
               }
             }
-        # This output will be 'true' if we need to build, and 'false' otherwise.
-        # We use it in the 'if' condition of subsequent steps.
 
+  build:
+    needs: check_version
+    if: needs.check_version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed to create the GitHub Release
+
+    steps:
       - name: ⬇️ Checkout code
-        if: steps.check_release.outputs.result == 'true'
         uses: actions/checkout@v4
 
       - name: 🟢 Set up Go
-        if: steps.check_release.outputs.result == 'true'
         uses: actions/setup-go@v5
         with:
           go-version: 'stable'
-          cache: true # Enable caching for Go modules
+          cache: false # Disabled default cache in favor of robust custom cache below
 
-      - name: 📦 Cache xcaddy binary
-        if: steps.check_release.outputs.result == 'true'
-        id: cache-xcaddy
+      - name: 📦 Cache Go modules, build cache, and xcaddy
+        id: cache-go
         uses: actions/cache@v4
         with:
-          path: ~/go/bin/xcaddy
-          key: ${{ runner.os }}-xcaddy
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+            ~/go/bin/xcaddy
+          key: ${{ runner.os }}-caddy-${{ needs.check_version.outputs.caddy_version }}-${{ hashFiles('CADDY_PLUGINS.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-caddy-
 
       - name: 🛠️ Install xcaddy
-        if: steps.check_release.outputs.result == 'true' && steps.cache-xcaddy.outputs.cache-hit != 'true'
+        if: steps.cache-go.outputs.cache-hit != 'true'
         run: go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
 
       - name: 📚 Read plugin list from file
-        if: steps.check_release.outputs.result == 'true'
         id: plugins
         run: |
-          # This command reads each line in CADDY_PLUGINS.txt,
-          # prepends '--with ' to it, and joins them all into a single line.
           echo "plugin_args=$(sed 's/^/--with /' CADDY_PLUGINS.txt | xargs)" >> $GITHUB_OUTPUT
 
       - name: 🏗️ Build custom Caddy binary
-        if: steps.check_release.outputs.result == 'true'
         run: |
-          # Use the xcaddy binary from the Go bin path
-          ~/go/bin/xcaddy build ${{ steps.caddy_version.outputs.release }} ${{ steps.plugins.outputs.plugin_args }}
-          # Rename the output for clarity in the release
-          mv caddy caddy-custom
+          ~/go/bin/xcaddy build ${{ needs.check_version.outputs.caddy_version }} \
+            --output caddy-custom \
+            ${{ steps.plugins.outputs.plugin_args }}
+            
+          # Generate SHA-256 checksum for deployment verification
+          sha256sum caddy-custom > caddy-custom.sha256
 
       - name: 🎉 Create GitHub Release
-        if: steps.check_release.outputs.result == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: custom-${{ steps.caddy_version.outputs.release }}
-          name: Custom Caddy - ${{ steps.caddy_version.outputs.release }}
+          tag_name: custom-${{ needs.check_version.outputs.caddy_version }}
+          name: Custom Caddy - ${{ needs.check_version.outputs.caddy_version }}
           body: |
-            This is an automated build of Caddy version **${{ steps.caddy_version.outputs.release }}** with the following custom plugins:
+            This is an automated build of Caddy version **${{ needs.check_version.outputs.caddy_version }}** with the following custom plugins:
 
             ```
             ${{ steps.plugins.outputs.plugin_args }}
             ```
-          files: caddy-custom
+          files: |
+            caddy-custom
+            caddy-custom.sha256
