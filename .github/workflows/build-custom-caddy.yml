@@ -2,51 +2,59 @@ name: Build Custom Caddy if New Version Available
 
 on:
   workflow_dispatch: # Allows manual triggering
+    inputs:
+      force:
+        description: 'Rebuild even if a release for the latest Caddy version exists'
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: [CADDY_PLUGINS.txt] # Plugin list changed -> rebuild
   schedule:
-    - cron: '0 */6 * * *' # Increased frequency: runs every 6 hours
+    - cron: '0 */6 * * *' # Runs every 6 hours
+
+# Never run two builds at once (avoids racing to create the same release)
+concurrency:
+  group: build-custom-caddy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   check_version:
     runs-on: ubuntu-latest
     outputs:
-      should_build: ${{ steps.check_release.outputs.result }}
-      caddy_version: ${{ steps.caddy_version.outputs.release }}
+      should_build: ${{ steps.check.outputs.should_build }}
+      caddy_version: ${{ steps.check.outputs.caddy_version }}
     steps:
-      - name: 🔎 Get latest Caddy version
-        id: caddy_version
-        uses: pozetroninc/github-action-get-latest-release@v0.8.0
-        with:
-          repository: caddyserver/caddy
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: 🔎 Get latest Caddy version and check for existing release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force || github.event_name == 'push' }}
+        run: |
+          version=$(gh release view --repo caddyserver/caddy --json tagName --jq .tagName)
+          echo "caddy_version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: 📝 Check if release for this version already exists
-        id: check_release
-        uses: actions/github-script@v7
-        with:
-          script: |
-            try {
-              const release = await github.rest.repos.getReleaseByTag({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                tag: 'custom-${{ steps.caddy_version.outputs.release }}',
-              });
-              console.log('Release custom-${{ steps.caddy_version.outputs.release }} already exists.');
-              return false; // Release exists, do not proceed
-            } catch (error) {
-              if (error.status === 404) {
-                console.log('No release found for custom-${{ steps.caddy_version.outputs.release }}. Proceeding to build.');
-                return true; // Release does not exist, proceed
-              } else {
-                throw error; // Rethrow other errors
-              }
-            }
+          if [ "$FORCE" != "true" ] && gh release view "custom-$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release custom-$version already exists, nothing to do."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Building custom-$version."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
 
   build:
     needs: check_version
     if: needs.check_version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write # Needed to create the GitHub Release
+    env:
+      CADDY_VERSION: ${{ needs.check_version.outputs.caddy_version }}
+      GH_TOKEN: ${{ github.token }}
 
     steps:
       - name: ⬇️ Checkout code
@@ -56,49 +64,59 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: 'stable'
-          cache: false # Disabled default cache in favor of robust custom cache below
+          cache: false # Using the explicit cache below instead
 
-      - name: 📦 Cache Go modules, build cache, and xcaddy
-        id: cache-go
+      - name: 📦 Cache Go modules and build cache
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-            ~/go/bin/xcaddy
-          key: ${{ runner.os }}-caddy-${{ needs.check_version.outputs.caddy_version }}-${{ hashFiles('CADDY_PLUGINS.txt') }}
+          key: ${{ runner.os }}-caddy-${{ env.CADDY_VERSION }}-${{ hashFiles('CADDY_PLUGINS.txt') }}
           restore-keys: |
             ${{ runner.os }}-caddy-
 
       - name: 🛠️ Install xcaddy
-        if: steps.cache-go.outputs.cache-hit != 'true'
         run: go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
-
-      - name: 📚 Read plugin list from file
-        id: plugins
-        run: |
-          echo "plugin_args=$(sed 's/^/--with /' CADDY_PLUGINS.txt | xargs)" >> $GITHUB_OUTPUT
 
       - name: 🏗️ Build custom Caddy binary
         run: |
-          ~/go/bin/xcaddy build ${{ needs.check_version.outputs.caddy_version }} \
-            --output caddy-custom \
-            ${{ steps.plugins.outputs.plugin_args }}
-            
-          # Generate SHA-256 checksum for deployment verification
-          sha256sum caddy-custom > caddy-custom.sha256
+          # Build --with args from the plugin list, ignoring blank lines and # comments
+          args=()
+          while IFS= read -r line; do
+            line="${line%%#*}"
+            line="$(echo "$line" | xargs)"
+            [ -n "$line" ] && args+=(--with "$line")
+          done < CADDY_PLUGINS.txt
 
-      - name: 🎉 Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: custom-${{ needs.check_version.outputs.caddy_version }}
-          name: Custom Caddy - ${{ needs.check_version.outputs.caddy_version }}
-          body: |
-            This is an automated build of Caddy version **${{ needs.check_version.outputs.caddy_version }}** with the following custom plugins:
+          xcaddy build "$CADDY_VERSION" --output caddy.custom "${args[@]}"
 
-            ```
-            ${{ steps.plugins.outputs.plugin_args }}
-            ```
-          files: |
-            caddy-custom
-            caddy-custom.sha256
+          ./caddy.custom version
+          sha256sum caddy.custom > caddy.custom.sha256
+
+      - name: 📝 Write release notes
+        run: |
+          {
+            echo "Automated build of Caddy **$CADDY_VERSION** with the following custom plugins:"
+            echo
+            echo '```'
+            grep -v -e '^\s*#' -e '^\s*$' CADDY_PLUGINS.txt
+            echo '```'
+            echo
+            echo "📋 **[Caddy $CADDY_VERSION release notes](https://github.com/caddyserver/caddy/releases/tag/$CADDY_VERSION)**"
+            echo
+            echo "Verify the download with \`sha256sum -c caddy.custom.sha256\`."
+          } > release-notes.md
+
+      - name: 🎉 Create (or update) GitHub Release
+        run: |
+          tag="custom-$CADDY_VERSION"
+          title="Custom Caddy - $CADDY_VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            # Forced rebuild: replace assets and notes
+            gh release upload "$tag" caddy.custom caddy.custom.sha256 --clobber
+            gh release edit "$tag" --title "$title" --notes-file release-notes.md
+          else
+            gh release create "$tag" caddy.custom caddy.custom.sha256 \
+              --title "$title" --notes-file release-notes.md
+          fi
